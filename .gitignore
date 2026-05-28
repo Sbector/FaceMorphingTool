@@ -28,16 +28,15 @@ env/
 Thumbs.db
 
 # Project output & cache
-output/*.mp4
-output/*.avi
-output/*.mov
+output/
 .cache/
 *.cache
 .landmarks_cache.json
 session.json
 timing_editor.tmp
 
-# Large datasets (new image collections)
+# Large datasets & images (exclude photos to save space)
+photos/
 photos_nuevo/
 landmarks_nuevo/
 
