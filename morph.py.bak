@@ -1,0 +1,201 @@
+"""
+CLI entry point: face morphing orchestration.
+Usage: python morph.py --photos photos/ --output output/morph.mp4
+"""
+
+import argparse
+import sys
+from pathlib import Path
+from itertools import chain
+import cv2
+
+from detect import detect_landmarks_batch
+from warp import generate_morph_frames
+from video_writer import write_video
+
+
+def normalize_images(images_dict, landmarks_dict, target_size):
+    """
+    Normalize all images to same size and adjust landmarks accordingly.
+    
+    Args:
+        images_dict: {filename: image}
+        landmarks_dict: {filename: landmarks}
+        target_size: tuple (width, height)
+    
+    Returns:
+        images_normalized: {filename: resized image}
+        landmarks_normalized: {filename: scaled landmarks}
+    """
+    images_normalized = {}
+    landmarks_normalized = {}
+    
+    w_target, h_target = target_size
+    
+    for filename, image in images_dict.items():
+        h_orig, w_orig = image.shape[:2]
+        scale_x = w_target / w_orig
+        scale_y = h_target / h_orig
+        
+        # Resize image
+        image_resized = cv2.resize(image, (w_target, h_target))
+        images_normalized[filename] = image_resized
+        
+        # Scale landmarks
+        landmarks = landmarks_dict[filename].copy()
+        landmarks[:, 0] *= scale_x
+        landmarks[:, 1] *= scale_y
+        landmarks_normalized[filename] = landmarks.astype('float32')
+    
+    return images_normalized, landmarks_normalized
+
+
+def create_frame_generators(filenames, images, landmarks, fps, transition_duration, hold_duration):
+    """
+    Create frame generators for each hold + transition pair.
+    
+    Args:
+        filenames: list of str, filenames in order
+        images: {filename: image}
+        landmarks: {filename: landmarks}
+        fps: int, frames per second
+        transition_duration: float, seconds
+        hold_duration: float, seconds
+    
+    Yields:
+        Frame generators chained together
+    """
+    n_files = len(filenames)
+    hold_frames = int(round(hold_duration * fps))
+    trans_frames = int(round(transition_duration * fps))
+    
+    print(f"Frame counts: hold={hold_frames}, transition={trans_frames}")
+    
+    for i in range(n_files):
+        current_file = filenames[i]
+        next_file = filenames[(i + 1) % n_files]
+        
+        img_current = images[current_file]
+        lm_current = landmarks[current_file]
+        
+        img_next = images[next_file]
+        lm_next = landmarks[next_file]
+        
+        # Emit hold frames
+        if hold_frames > 0:
+            print(f"Hold frame {i+1}/{n_files}: {current_file}")
+            for _ in range(hold_frames):
+                yield img_current
+        
+        # Emit transition frames
+        print(f"Morph {current_file} → {next_file} ({trans_frames} frames)")
+        for frame in generate_morph_frames(img_current, lm_current, img_next, lm_next, trans_frames):
+            yield frame
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Face morphing video generator - creates smooth face transition loops'
+    )
+    parser.add_argument(
+        '--photos',
+        type=str,
+        default='photos/',
+        help='Directory containing portrait images'
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        default='output/morph.mp4',
+        help='Output MP4 file path'
+    )
+    parser.add_argument(
+        '--fps',
+        type=int,
+        default=30,
+        help='Frames per second'
+    )
+    parser.add_argument(
+        '--duration',
+        type=float,
+        default=2.0,
+        help='Duration of each transition in seconds'
+    )
+    parser.add_argument(
+        '--hold',
+        type=float,
+        default=0.5,
+        help='Hold time for each face in seconds (0 = immediate morph)'
+    )
+    parser.add_argument(
+        '--size',
+        type=int,
+        default=512,
+        help='Output square resolution (width=height)'
+    )
+    parser.add_argument(
+        '--order',
+        type=str,
+        default=None,
+        help='Comma-separated list of filenames to override alphabetical order'
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate paths
+    photo_dir = Path(args.photos)
+    if not photo_dir.exists():
+        print(f"Error: Photo directory not found: {photo_dir}")
+        return 1
+    
+    output_path = Path(args.output)
+    
+    try:
+        # Detect landmarks
+        print(f"Loading images from {photo_dir}...")
+        landmarks_dict, images_dict, filenames = detect_landmarks_batch(
+            photo_dir,
+            target_size=(args.size, args.size)
+        )
+        
+        # Override order if specified
+        if args.order:
+            requested_order = [f.strip() for f in args.order.split(',')]
+            filenames = requested_order
+        
+        print(f"Loaded {len(filenames)} images: {', '.join(filenames)}")
+        
+        # Normalize all images to target size and adjust landmarks
+        images_normalized, landmarks_normalized = normalize_images(
+            images_dict, landmarks_dict, (args.size, args.size)
+        )
+        
+        # Generate video
+        frame_gen = create_frame_generators(
+            filenames,
+            images_normalized,
+            landmarks_normalized,
+            fps=args.fps,
+            transition_duration=args.duration,
+            hold_duration=args.hold
+        )
+        
+        write_video(
+            output_path,
+            frame_gen,
+            size=(args.size, args.size),
+            fps=args.fps
+        )
+        
+        print(f"\n✓ Success! Video saved to {output_path}")
+        return 0
+        
+    except Exception as e:
+        print(f"\n✗ Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

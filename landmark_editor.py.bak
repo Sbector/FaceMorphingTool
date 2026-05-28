@@ -1,0 +1,491 @@
+"""
+Interactive OpenCV UI for creating face correspondence points.
+Place ~30 pairs of points between two face images to guide TPS morphing.
+
+Usage:
+  python landmark_editor.py --image-a photos/Hermana.jpg --image-b photos/Hermano.jpg
+  python landmark_editor.py --image-a photos/Hermana.jpg --image-b photos/Hermano.jpg --output landmarks/custom.json
+
+Keybinds:
+  Left-click (left image)  → Start placing point in A
+  Left-click (right image) → Complete pair in B
+  Right-click              → Select closest point (radius 15px)
+  Drag (when selected)     → Move selected point
+  Delete/Backspace         → Delete selected pair
+  
+  s                        → Save JSON
+  u                        → Undo last pair
+  a                        → Auto-seed 30 semantic points from MediaPipe
+  r                        → Reset (confirm clear all)
+  l                        → Load existing JSON if available
+  q                        → Quit (confirm if unsaved)
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+import cv2
+import numpy as np
+
+from detect import detect_landmarks
+
+
+# MediaPipe landmark indices for semantic key features
+KEY_LANDMARK_INDICES = [
+    1,    # nariz: tip
+    168,  # nariz: puente
+    6,    # nariz: dorso
+    197,  # nariz: raíz
+    33,   # ojo izq: canto interno
+    133,  # ojo izq: canto externo
+    159,  # ojo izq: párpado superior
+    145,  # ojo izq: párpado inferior
+    362,  # ojo der: canto interno
+    263,  # ojo der: canto externo
+    386,  # ojo der: párpado superior
+    374,  # ojo der: párpado inferior
+    70,   # ceja izq: medial
+    107,  # ceja izq: lateral
+    55,   # ceja izq: punta
+    300,  # ceja der: medial
+    336,  # ceja der: lateral
+    285,  # ceja der: punta
+    61,   # boca: comisura izq
+    291,  # boca: comisura der
+    13,   # boca: labio sup centro
+    14,   # boca: labio inf centro
+    17,   # barbilla
+    152,  # mentón
+    234,  # mejilla izq (lateral)
+    454,  # mejilla der (lateral)
+    10,   # frente: centro
+    151,  # frente: abajo
+    172,  # mandíbula izq
+    397,  # mandíbula der
+]
+
+
+class LandmarkEditor:
+    def __init__(self, image_a_path, image_b_path, display_width=700, output_json=None):
+        """
+        Initialize editor with two images.
+        
+        Args:
+            image_a_path: str, path to first image
+            image_b_path: str, path to second image
+            display_width: int, width to display (scaled keeping aspect ratio)
+            output_json: str or None, output JSON path (default: landmarks/{stem_a}_{stem_b}.json)
+        """
+        self.image_a_path = Path(image_a_path)
+        self.image_b_path = Path(image_b_path)
+        self.display_width = display_width
+        
+        # Load images (handle UTF-8 paths properly on Windows)
+        def load_image_robust(path):
+            path_obj = Path(path)
+            # Try direct path first (works on most systems)
+            img = cv2.imread(str(path_obj))
+            if img is None:
+                # Fall back to imdecode for UTF-8 paths
+                import numpy as np
+                img = cv2.imdecode(np.fromfile(path_obj, dtype=np.uint8), cv2.IMREAD_COLOR)
+            return img
+        
+        self.img_a_orig = load_image_robust(image_a_path)
+        self.img_b_orig = load_image_robust(image_b_path)
+        
+        if self.img_a_orig is None or self.img_b_orig is None:
+            raise RuntimeError(f"Failed to load images: {image_a_path}, {image_b_path}")
+        
+        h_a, w_a = self.img_a_orig.shape[:2]
+        h_b, w_b = self.img_b_orig.shape[:2]
+        
+        # Scale factor for display
+        self.scale_a = display_width / w_a
+        self.scale_b = display_width / w_b
+        
+        # Scaled versions for display
+        new_h_a = int(h_a * self.scale_a)
+        new_h_b = int(h_b * self.scale_b)
+        self.img_a_disp = cv2.resize(self.img_a_orig, (display_width, new_h_a))
+        self.img_b_disp = cv2.resize(self.img_b_orig, (display_width, new_h_b))
+        
+        # Padding to make same height for display
+        max_h = max(new_h_a, new_h_b)
+        if new_h_a < max_h:
+            pad = max_h - new_h_a
+            self.img_a_disp = cv2.copyMakeBorder(self.img_a_disp, 0, pad, 0, 0, cv2.BORDER_CONSTANT, (64, 64, 64))
+        if new_h_b < max_h:
+            pad = max_h - new_h_b
+            self.img_b_disp = cv2.copyMakeBorder(self.img_b_disp, 0, pad, 0, 0, cv2.BORDER_CONSTANT, (64, 64, 64))
+        
+        self.disp_h, _ = self.img_a_disp.shape[:2]
+        
+        # Create separator (vertical line)
+        self.separator = np.ones((self.disp_h, 5, 3), dtype=np.uint8) * 128
+        
+        # State
+        self.pairs = []  # list of {'a': [x, y], 'b': [x, y]}
+        self.pending_a = None
+        self.selected_idx = None
+        self.selected_side = None  # 'a' or 'b'
+        self.drag_active = False  # Track if currently dragging a point
+        self.dirty = False
+        self.frame_count = 0  # for blinking
+        
+        # Output path
+        if output_json:
+            self.output_json = Path(output_json)
+        else:
+            stem_a = self.image_a_path.stem
+            stem_b = self.image_b_path.stem
+            self.output_json = Path('landmarks') / f"{stem_a}_{stem_b}.json"
+        
+        self.output_json.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Try to load existing JSON
+        if self.output_json.exists():
+            self.load_json()
+    
+    def load_json(self):
+        """Load correspondence points from existing JSON file."""
+        try:
+            with open(self.output_json, 'r') as f:
+                data = json.load(f)
+            self.pairs = data.get('pairs', [])
+            print(f"Loaded {len(self.pairs)} pairs from {self.output_json}")
+            self.dirty = False
+        except Exception as e:
+            print(f"Failed to load JSON: {e}")
+    
+    def save_json(self):
+        """Save correspondence points to JSON file."""
+        data = {
+            'image_a': self.image_a_path.name,
+            'image_b': self.image_b_path.name,
+            'image_a_size': list(self.img_a_orig.shape[:2][::-1]),  # [w, h]
+            'image_b_size': list(self.img_b_orig.shape[:2][::-1]),
+            'pairs': self.pairs,
+        }
+        
+        try:
+            with open(self.output_json, 'w') as f:
+                json.dump(data, f, indent=2)
+            print(f"✓ Saved {len(self.pairs)} pairs to {self.output_json}")
+            self.dirty = False
+        except Exception as e:
+            print(f"✗ Failed to save: {e}")
+    
+    def point_in_image_a(self, x, y):
+        """Check if point is in left (A) half of display."""
+        return x < self.display_width
+    
+    def pixel_to_orig_a(self, x_disp, y_disp):
+        """Convert display coords to original image A coords."""
+        x_orig = int(x_disp / self.scale_a)
+        y_orig = int(y_disp / self.scale_a)
+        return [x_orig, y_orig]
+    
+    def pixel_to_orig_b(self, x_disp, y_disp):
+        """Convert display coords to original image B coords."""
+        x_orig = int(x_disp / self.scale_b)
+        y_orig = int(y_disp / self.scale_b)
+        return [x_orig, y_orig]
+    
+    def orig_to_disp_a(self, x_orig, y_orig):
+        """Convert original image A coords to display coords."""
+        x_disp = int(x_orig * self.scale_a)
+        y_disp = int(y_orig * self.scale_a)
+        return x_disp, y_disp
+    
+    def orig_to_disp_b(self, x_orig, y_orig):
+        """Convert original image B coords to display coords."""
+        x_disp = int(x_orig * self.scale_b) + self.display_width + 5
+        y_disp = int(y_orig * self.scale_b)
+        return x_disp, y_disp
+    
+    def find_closest_point(self, x_disp, y_disp, radius_px=15):
+        """Find closest pair within radius (in display pixels)."""
+        best_idx = None
+        best_dist = radius_px
+        best_side = None
+        
+        for i, pair in enumerate(self.pairs):
+            # Check point A
+            x_a, y_a = self.orig_to_disp_a(pair['a'][0], pair['a'][1])
+            dist_a = np.sqrt((x_a - x_disp)**2 + (y_a - y_disp)**2)
+            if dist_a < best_dist:
+                best_dist = dist_a
+                best_idx = i
+                best_side = 'a'
+            
+            # Check point B
+            x_b, y_b = self.orig_to_disp_b(pair['b'][0], pair['b'][1])
+            dist_b = np.sqrt((x_b - x_disp)**2 + (y_b - y_disp)**2)
+            if dist_b < best_dist:
+                best_dist = dist_b
+                best_idx = i
+                best_side = 'b'
+        
+        return best_idx, best_side
+    
+    def handle_click(self, x, y, button):
+        """Handle mouse clicks."""
+        if button == 1:  # Left click
+            # Check for proximity to existing points first (for drag)
+            idx, side = self.find_closest_point(x, y, radius_px=15)
+            if idx is not None:
+                # Click on existing point → prepare for drag
+                self.selected_idx = idx
+                self.selected_side = side
+                self.drag_active = True
+                print(f"  Selected pair #{idx+1} ({side}) for drag")
+            else:
+                # Click on empty space → start placing new point
+                if self.point_in_image_a(x, y):
+                    # Start point in A
+                    self.pending_a = self.pixel_to_orig_a(x, y)
+                    print(f"  Point A placed at {self.pending_a}. Click on right image for point B.")
+                else:
+                    # Complete point in B (if pending_a exists)
+                    if self.pending_a:
+                        x_b_disp = x - (self.display_width + 5)
+                        y_b_disp = y
+                        point_b = self.pixel_to_orig_b(x_b_disp, y_b_disp)
+                        
+                        pair = {'id': len(self.pairs), 'a': self.pending_a, 'b': point_b}
+                        self.pairs.append(pair)
+                        print(f"  Pair #{len(self.pairs)}: A{self.pending_a} <-> B{point_b}")
+                        self.pending_a = None
+                        self.dirty = True
+        
+        elif button == 3:  # Right click
+            idx, side = self.find_closest_point(x, y)
+            if idx is not None:
+                self.selected_idx = idx
+                self.selected_side = side
+                print(f"  Selected pair #{idx+1} ({side})")
+            else:
+                self.selected_idx = None
+                self.selected_side = None
+    
+    def handle_drag(self, x, y):
+        """Handle mouse drag (move selected point)."""
+        if not self.drag_active:
+            return
+        
+        if self.selected_idx is not None and self.selected_side is not None:
+            pair = self.pairs[self.selected_idx]
+            
+            if self.selected_side == 'a':
+                if self.point_in_image_a(x, y):
+                    pair['a'] = self.pixel_to_orig_a(x, y)
+                    self.dirty = True
+            else:  # 'b'
+                if not self.point_in_image_a(x, y):
+                    x_b_disp = x - (self.display_width + 5)
+                    y_b_disp = y
+                    pair['b'] = self.pixel_to_orig_b(x_b_disp, y_b_disp)
+                    self.dirty = True
+    
+    def handle_key(self, key):
+        """Handle keyboard input."""
+        if key == ord('s'):
+            self.save_json()
+        elif key == ord('u'):
+            if self.pairs:
+                removed = self.pairs.pop()
+                print(f"  Undo: removed pair #{len(self.pairs)+1}")
+                self.dirty = True
+        elif key == ord('d') or key == 255:  # 255 = Delete key
+            if self.selected_idx is not None:
+                self.pairs.pop(self.selected_idx)
+                print(f"  Deleted pair #{self.selected_idx+1}")
+                self.selected_idx = None
+                self.selected_side = None
+                self.dirty = True
+        elif key == ord('a'):
+            self.auto_seed()
+        elif key == ord('r'):
+            print("  Reset? Press 'r' again to confirm.")
+            key2 = cv2.waitKey(1000)
+            if key2 == ord('r'):
+                self.pairs = []
+                self.pending_a = None
+                self.selected_idx = None
+                print("  ✓ Reset.")
+                self.dirty = True
+        elif key == ord('l'):
+            self.load_json()
+        elif key == ord('q'):
+            if self.dirty:
+                print("  Unsaved changes! Press 'q' again to quit without saving, or 's' to save.")
+                key2 = cv2.waitKey(1000)
+                if key2 == ord('q'):
+                    return 'quit'
+            else:
+                return 'quit'
+        
+        return None
+    
+    def auto_seed(self):
+        """Seed 30 semantic landmark pairs from MediaPipe."""
+        print(f"  Auto-seeding landmarks from MediaPipe...")
+        try:
+            lm_a, _ = detect_landmarks(str(self.image_a_path))
+            lm_b, _ = detect_landmarks(str(self.image_b_path))
+            
+            self.pairs = []
+            for idx, lm_idx in enumerate(KEY_LANDMARK_INDICES):
+                if lm_idx < len(lm_a) and lm_idx < len(lm_b):
+                    pair = {
+                        'id': idx,
+                        'a': [float(lm_a[lm_idx, 0]), float(lm_a[lm_idx, 1])],
+                        'b': [float(lm_b[lm_idx, 0]), float(lm_b[lm_idx, 1])],
+                    }
+                    self.pairs.append(pair)
+            
+            print(f"  ✓ Auto-seeded {len(self.pairs)} semantic points")
+            self.pending_a = None
+            self.selected_idx = None
+            self.dirty = True
+        except Exception as e:
+            print(f"  ✗ Auto-seed failed: {e}")
+    
+    def render(self):
+        """Render display canvas with points and status."""
+        # Concatenate images horizontally
+        canvas = np.hstack([self.img_a_disp, self.separator, self.img_b_disp])
+        
+        # Draw completed pairs
+        colors = [
+            (0, 255, 0),      # green
+            (0, 165, 255),    # orange
+            (255, 0, 0),      # cyan
+            (0, 255, 255),    # yellow
+            (255, 0, 255),    # magenta
+        ]
+        
+        for i, pair in enumerate(self.pairs):
+            color = colors[i % len(colors)]
+            is_selected = (i == self.selected_idx)
+            
+            if is_selected:
+                color = (0, 165, 255)  # orange for selected
+            
+            # Draw point A
+            x_a, y_a = self.orig_to_disp_a(pair['a'][0], pair['a'][1])
+            cv2.circle(canvas, (x_a, y_a), 8, color, -1)
+            cv2.putText(canvas, str(i+1), (x_a-5, y_a+5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Draw point B
+            x_b, y_b = self.orig_to_disp_b(pair['b'][0], pair['b'][1])
+            cv2.circle(canvas, (x_b, y_b), 8, color, -1)
+            cv2.putText(canvas, str(i+1), (x_b-5, y_b+5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Draw pending point (blinking)
+        if self.pending_a is not None:
+            if (self.frame_count // 8) % 2 == 0:  # Blink every 16 frames
+                x_a, y_a = self.orig_to_disp_a(self.pending_a[0], self.pending_a[1])
+                cv2.circle(canvas, (x_a, y_a), 8, (0, 255, 255), -1)  # yellow
+        
+        # Status bar
+        status_height = 25
+        status_bg = np.zeros((status_height, canvas.shape[1], 3), dtype=np.uint8)
+        status_text = f"Pairs: {len(self.pairs)} | s=Save u=Undo d=Delete a=AutoSeed r=Reset l=Load q=Quit"
+        if self.dirty:
+            status_text += " [*unsaved*]"
+        cv2.putText(status_bg, status_text, (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        canvas = np.vstack([canvas, status_bg])
+        
+        self.frame_count += 1
+        return canvas
+    
+    def run(self):
+        """Main event loop."""
+        window_name = f"Landmark Editor: {self.image_a_path.name} <-> {self.image_b_path.name}"
+        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+        
+        # Mouse callback
+        def mouse_callback(event, x, y, flags, userdata):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self.handle_click(x, y, 1)
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                self.handle_click(x, y, 3)
+            elif event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON:
+                self.handle_drag(x, y)
+            elif event == cv2.EVENT_LBUTTONUP:
+                self.drag_active = False
+        
+        cv2.setMouseCallback(window_name, mouse_callback)
+        
+        print(f"\n{'='*70}")
+        print(f"Landmark Editor: {self.image_a_path.name} <-> {self.image_b_path.name}")
+        print(f"Output: {self.output_json}")
+        print(f"{'='*70}")
+        print("Instructions:")
+        print("  Left-click left image → place point A")
+        print("  Left-click right image → complete pair as point B")
+        print("  Right-click → select point for editing")
+        print("  Drag (when selected) → move point")
+        print("  Delete/Backspace → delete selected pair")
+        print("  s=Save, u=Undo, a=AutoSeed, r=Reset, l=Load, q=Quit")
+        print(f"{'='*70}\n")
+        
+        while True:
+            canvas = self.render()
+            cv2.imshow(window_name, canvas)
+            
+            key = cv2.waitKey(30) & 0xFF
+            if key != 255:  # 255 = no key pressed
+                result = self.handle_key(key)
+                if result == 'quit':
+                    break
+        
+        cv2.destroyAllWindows()
+        
+        if self.dirty:
+            print(f"\n⚠️  Unsaved changes to {self.output_json}")
+        else:
+            print(f"\n✓ Final pairs: {len(self.pairs)}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Interactive face correspondence point editor')
+    parser.add_argument('--image-a', help='Path to source image (left)')
+    parser.add_argument('--image-b', help='Path to target image (right)')
+    parser.add_argument('--output', default=None, help='Output JSON path (default: landmarks/{stem_a}_{stem_b}.json)')
+    parser.add_argument('--display-width', type=int, default=700, help='Display width in pixels')
+    parser.add_argument('--session', default=None, help='Session JSON file with list of pairs to edit')
+    
+    args = parser.parse_args()
+    
+    try:
+        if args.session:
+            editor = LandmarkEditor(
+                None, None,
+                display_width=args.display_width,
+                session_json=args.session
+            )
+        else:
+            if not args.image_a or not args.image_b:
+                parser.error("Either --session or both --image-a and --image-b are required")
+            editor = LandmarkEditor(
+                args.image_a, args.image_b,
+                display_width=args.display_width,
+                output_json=args.output
+            )
+        editor.run()
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+    
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

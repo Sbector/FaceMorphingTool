@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Project output & cache
+output/*.mp4
+output/*.avi
+output/*.mov
+.cache/
+*.cache
+.landmarks_cache.json
+session.json
+timing_editor.tmp
+
+# Large datasets (new image collections)
+photos_nuevo/
+landmarks_nuevo/
+
+# OS
+.DS_Store
+Thumbs.db
