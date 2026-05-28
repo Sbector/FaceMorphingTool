@@ -151,12 +151,13 @@ def create_session_json(missing_pairs, photos_dir, landmarks_dir, session_path):
     session_data = {
         "pairs": []
     }
+    photos_root = Path(photos_dir).resolve()
     
     for a, b, json_path in missing_pairs:
         session_data["pairs"].append({
-            "image_a": str(Path(photos_dir) / a),
-            "image_b": str(Path(photos_dir) / b),
-            "output": str(json_path)
+            "image_a": str((photos_root / a).resolve()),
+            "image_b": str((photos_root / b).resolve()),
+            "output": str(Path(json_path).resolve())
         })
     
     with open(session_path, "w") as f:

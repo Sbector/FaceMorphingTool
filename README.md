@@ -19,8 +19,9 @@ Herramienta para generar videos de morphing facial de alta calidad a partir de f
 11. [Backends de morphing](#backends-de-morphing)
 12. [Referencia de argumentos CLI](#referencia-de-argumentos-cli)
 13. [Estructura del proyecto](#estructura-del-proyecto)
-14. [Ejemplos completos](#ejemplos-completos)
-15. [Solución de problemas](#solución-de-problemas)
+14. [Recuperación y validación post-migración](#recuperación-y-validación-post-migración)
+15. [Ejemplos completos](#ejemplos-completos)
+16. [Solución de problemas](#solución-de-problemas)
 
 ---
 
@@ -56,10 +57,10 @@ python pipeline.py
 python pipeline.py --skip-editor --skip-timing
 
 # Dataset alternativo en modo todos-los-pares
-python pipeline.py --photos photos_nuevo --landmarks-dir landmarks_nuevo --mode all-pairs
+python pipeline.py --photos photos --landmarks-dir landmarks --mode all-pairs
 
 # Revisar y ajustar pares existentes
-python review.py --photos photos_nuevo --landmarks-dir landmarks_nuevo
+python review.py --photos photos --landmarks-dir landmarks
 ```
 
 ---
@@ -217,11 +218,11 @@ Para abrir todos los landmarks de un directorio en sesión para revisar y ajusta
 
 ```bash
 # Revisar todos los pares de un dataset
-python review.py --photos photos_nuevo --landmarks-dir landmarks_nuevo
+python review.py --photos photos --landmarks-dir landmarks
 
 # Con filtro (solo ciertos pares)
-python review.py --photos photos_nuevo --landmarks-dir landmarks_nuevo --filter "1_*"
-python review.py --photos photos_nuevo --landmarks-dir landmarks_nuevo --filter "*_2*"
+python review.py --photos photos --landmarks-dir landmarks --filter "1_*"
+python review.py --photos photos --landmarks-dir landmarks --filter "*_2*"
 
 # Con tamaño de display personalizado
 python review.py --photos photos --landmarks-dir landmarks --display-width 500
@@ -237,10 +238,10 @@ python review.py --photos photos --landmarks-dir landmarks --display-width 500
 Para abrir el editor directamente en un par ya editado:
 
 ```bash
-python landmark_editor.py --image-a photos_nuevo/1.png --image-b photos_nuevo/2.png
+python landmark_editor.py --image-a photos/1.png --image-b photos/2.png
 ```
 
-El editor cargará automáticamente el JSON existente si lo encuentra en `landmarks_nuevo/1_2.json`.
+El editor cargará automáticamente el JSON existente si lo encuentra en `landmarks/1_2.json`.
 
 ### Workflow de ajuste fino (par ya editado)
 
@@ -330,16 +331,26 @@ python pipeline.py --profile final --skip-timing
 # Genera JSONs para todas las imágenes en photos/
 # (solo una dirección A→B; el pipeline genera la inversa)
 python auto_landmarks.py
+
+# También puedes apuntar a un directorio explícito
+python auto_landmarks.py --photos photos --landmarks-dir landmarks
 ```
 
 **Características:**
-- Escanea el directorio `photos/`
-- Genera pares en `landmarks/`
+- Escanea el directorio indicado por `--photos` (por defecto `photos/`)
+- Genera pares en el directorio indicado por `--landmarks-dir` (por defecto `landmarks/`)
 - Para N imágenes: genera `C(N,2) = N(N-1)/2` archivos JSON
 - Usa 30 puntos semánticos clave (nariz, ojos, cejas, boca, mandíbula)
 - Omite los pares que ya existan
 
 Tras la generación automática, se recomienda **revisar y ajustar** los pares manualmente con `review.py` para mejor calidad, especialmente en zonas de ojos, boca y contorno facial.
+
+### 🏷️ Estado de los landmarks: auto vs manual
+
+- Un JSON con **30 pares** suele venir de `auto_landmarks.py` sin edición manual posterior.
+- Un JSON con **más de 30 pares** suele indicar ajuste manual en `landmark_editor.py`.
+- Después de restaurar landmarks desde git o mover imágenes entre directorios, corre `python validate.py --photos photos --landmarks-dir landmarks` para verificar imágenes, tamaños y coordenadas.
+- Si restauras un par manual, revisa también su inverso dirigido. Si la inversa sigue en 30 puntos auto-generados, conviene regenerarla o revisarla con `review.py`.
 
 ---
 
@@ -525,8 +536,26 @@ python review.py [opciones]
 
 **Ejemplos con `--filter`:**
 ```bash
-python review.py --landmarks-dir landmarks_nuevo --filter "1_*"     # Solo pares de imagen 1
-python review.py --landmarks-dir landmarks_nuevo --filter "*_3*"    # Pares donde aparece imagen 3
+python review.py --landmarks-dir landmarks --filter "1_*"     # Solo pares de imagen 1
+python review.py --landmarks-dir landmarks --filter "*_3*"    # Pares donde aparece imagen 3
+```
+
+### auto_landmarks.py
+
+```bash
+python auto_landmarks.py [opciones]
+
+--photos DIR              Directorio de fotos de entrada        [photos]
+--landmarks-dir DIR       Directorio de JSONs generados         [landmarks]
+```
+
+### validate.py
+
+```bash
+python validate.py [opciones]
+
+--photos DIR              Directorio de fotos de entrada        [photos]
+--landmarks-dir DIR       Directorio de JSONs a validar         [landmarks]
 ```
 
 ---
@@ -556,9 +585,10 @@ face_morpher/
 ├── output/                  # Videos generados (no versionado)
 └── .venv/                   # Entorno virtual (no versionado)
 
-# Directorios adicionales (creados por el usuario según el dataset):
-# photos_<nombre>/          # Imágenes de un dataset alternativo
-# landmarks_<nombre>/       # JSONs de correspondencias del dataset alternativo
+# Notas:
+# - photos/ y landmarks/ son los directorios canónicos tras la migración
+# - Si quieres usar otro dataset, pásalo por flags CLI en vez de renombrar el flujo base
+# - pipeline.py, review.py, auto_landmarks.py y validate.py aceptan --photos y --landmarks-dir
 ```
 
 ---
@@ -577,22 +607,59 @@ face_morpher/
 
 ---
 
+## 🔄 Recuperación y validación post-migración
+
+Si una migración o una regeneración pisa landmarks manuales, este es el flujo seguro:
+
+```bash
+# 1. Validar el dataset activo
+python validate.py --photos photos --landmarks-dir landmarks
+
+# 2. Revisar en lote una familia de pares sensible
+python review.py --photos photos --landmarks-dir landmarks --filter "1_*"
+```
+
+### Restaurar landmarks desde git
+
+Para recuperar un JSON manual anterior, restaura el archivo puntual desde un commit conocido y vuelve a validar:
+
+```bash
+git show <commit>:landmarks/1_2.json > landmarks/1_2.json
+python validate.py --photos photos --landmarks-dir landmarks
+```
+
+### Cuándo regenerar una inversa
+
+- Si recuperas `A_B.json` manual y `B_A.json` sigue con 30 puntos auto-generados, la inversa ya no representa la misma calidad.
+- En ese caso, regenera `B_A.json` invirtiendo `image_a`/`image_b`, `image_a_size`/`image_b_size` y cada punto `a`/`b`, o ábrelo en `review.py` para corregirlo manualmente.
+- Si ambos archivos ya fueron ajustados manualmente, no conviene sobrescribirlos.
+
+### Qué detecta validate.py
+
+- JSON inválido o con BOM.
+- Imágenes referenciadas que ya no existen en `photos/`.
+- Diferencias entre `image_a_size` / `image_b_size` y el tamaño real de los PNG/JPG actuales.
+- Coordenadas fuera de rango o pares mal formados.
+- Conteos distintos entre un par dirigido y su inversa (`A_B.json` vs `B_A.json`).
+
+---
+
 ## 📝 Ejemplos completos
 
-### Ejemplo 1: Crear nuevo morphing con dataset nuevo
+### Ejemplo 1: Crear o actualizar el dataset activo
 
 ```bash
 # 1. Generar landmarks automáticamente
-python auto_landmarks.py
+python auto_landmarks.py --photos photos --landmarks-dir landmarks
 
 # 2. Revisar y ajustar en lote
-python review.py --photos photos_nuevo --landmarks-dir landmarks_nuevo
+python review.py --photos photos --landmarks-dir landmarks
 
 # 3. Render final
 python pipeline.py \
-  --photos photos_nuevo \
-  --landmarks-dir landmarks_nuevo \
-  --output output/morph_nuevo_final.mp4 \
+  --photos photos \
+  --landmarks-dir landmarks \
+  --output output/morph_final.mp4 \
   --mode all-pairs \
   --profile final \
   --skip-editor \
@@ -603,10 +670,10 @@ python pipeline.py \
 
 ```bash
 # Revisar solo los pares de imagen 1
-python review.py --landmarks-dir landmarks_nuevo --filter "1_*"
+python review.py --photos photos --landmarks-dir landmarks --filter "1_*"
 
 # O abrir un par específico directamente
-python landmark_editor.py --image-a photos_nuevo/1.png --image-b photos_nuevo/2.png
+python landmark_editor.py --image-a photos/1.png --image-b photos/2.png
 ```
 
 ### Ejemplo 3: Render rápido para QA

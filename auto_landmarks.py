@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Auto-generate landmark JSONs for all pairs using MediaPipe."""
 
+import argparse
 import json
-import cv2
 from pathlib import Path
-from itertools import combinations
+
+import cv2
+
 from detect import detect_landmarks
 
 # Import KEY_LANDMARK_INDICES from landmark_editor if available, else use default 30
@@ -69,8 +71,23 @@ def generate_pair_landmarks(img_a_path, img_b_path, output_json):
     return True
 
 def main():
-    photos_dir = Path("photos")
-    landmarks_dir = Path("landmarks")
+    parser = argparse.ArgumentParser(
+        description="Auto-generate landmark JSONs for image pairs using MediaPipe"
+    )
+    parser.add_argument(
+        "--photos",
+        default="photos",
+        help="Directory containing input images (default: photos)",
+    )
+    parser.add_argument(
+        "--landmarks-dir",
+        default="landmarks",
+        help="Directory for generated landmark JSONs (default: landmarks)",
+    )
+    args = parser.parse_args()
+
+    photos_dir = Path(args.photos)
+    landmarks_dir = Path(args.landmarks_dir)
     
     images = sorted([
         f for f in photos_dir.glob("*.png") if f.is_file()
@@ -79,11 +96,13 @@ def main():
     ])
     
     if not images:
-        print("[ERROR] No images found in photos")
+        print(f"[ERROR] No images found in {photos_dir}")
         return
     
     print(f"[INFO] Found {len(images)} images")
     print(f"[INFO] Using {len(KEY_LANDMARK_INDICES)} key points per pair")
+    print(f"[INFO] Photos directory: {photos_dir}")
+    print(f"[INFO] Landmarks directory: {landmarks_dir}")
     
     # Generate one-direction pairs (only A->B, not B->A)
     count = 0
