@@ -69,8 +69,8 @@ def generate_pair_landmarks(img_a_path, img_b_path, output_json):
     return True
 
 def main():
-    photos_dir = Path("photos_nuevo")
-    landmarks_dir = Path("landmarks_nuevo")
+    photos_dir = Path("photos")
+    landmarks_dir = Path("landmarks")
     
     images = sorted([
         f for f in photos_dir.glob("*.png") if f.is_file()
@@ -79,7 +79,7 @@ def main():
     ])
     
     if not images:
-        print("[ERROR] No images found in photos_nuevo")
+        print("[ERROR] No images found in photos")
         return
     
     print(f"[INFO] Found {len(images)} images")

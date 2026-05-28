@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 import json
 import os
+from pathlib import Path
 
-files = [
-    'landmarks/Yo_Hermana.json',
-    'landmarks/Hermana_Hermano.json',
-    'landmarks/Hermano_Mamá.json',
-    'landmarks/Mamá_Papá.json',
-    'landmarks/Papá_Yo.json'
-]
+# Dynamically scan landmarks directory
+landmarks_dir = Path("landmarks")
+files = sorted([str(f) for f in landmarks_dir.glob("*.json")])
+
+if not files:
+    print("[ERROR] No landmark JSON files found in landmarks/")
+    exit(1)
 
 print("\n=== LANDMARK FILES VALIDATION ===\n")
 total_pairs = 0

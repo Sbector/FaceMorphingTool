@@ -37,8 +37,6 @@ timing_editor.tmp
 
 # Large datasets & images (exclude photos to save space)
 photos/
-photos_nuevo/
-landmarks_nuevo/
 
 # OS
 .DS_Store

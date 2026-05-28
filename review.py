@@ -6,9 +6,9 @@ This tool scans a landmarks directory and opens all existing landmark JSONs
 in the landmark_editor in session mode, allowing fine-tuning of all pairs.
 
 Usage:
-    python review.py --photos photos_nuevo --landmarks-dir landmarks_nuevo
+    python review.py --photos photos --landmarks-dir landmarks
     python review.py --photos photos --landmarks-dir landmarks --filter "1_*"
-    python review.py --photos photos_nuevo --landmarks-dir landmarks_nuevo --display-width 400
+    python review.py --photos photos --landmarks-dir landmarks --display-width 400
 """
 
 import json
