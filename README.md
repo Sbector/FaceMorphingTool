@@ -327,14 +327,14 @@ python pipeline.py --profile final --skip-timing
 `auto_landmarks.py` detecta correspondencias con MediaPipe sin intervención manual:
 
 ```bash
-# Genera JSONs para todas las imágenes en photos_nuevo/
+# Genera JSONs para todas las imágenes en photos/
 # (solo una dirección A→B; el pipeline genera la inversa)
 python auto_landmarks.py
 ```
 
 **Características:**
-- Escanea el directorio `photos_nuevo/`
-- Genera pares en `landmarks_nuevo/`
+- Escanea el directorio `photos/`
+- Genera pares en `landmarks/`
 - Para N imágenes: genera `C(N,2) = N(N-1)/2` archivos JSON
 - Usa 30 puntos semánticos clave (nariz, ojos, cejas, boca, mandíbula)
 - Omite los pares que ya existan
@@ -551,12 +551,14 @@ face_morpher/
 ├── requirements.txt         # Dependencias Python
 ├── README.md                # Este archivo (guía completa)
 ├── LANDMARK_EDITOR_MANUAL.md # Manual detallado del editor (referencia)
-├── photos/                  # Imágenes de entrada dataset 1 (no versionado)
-├── photos_nuevo/            # Imágenes de entrada dataset 2 (no versionado)
-├── landmarks/               # JSONs de correspondencias dataset 1 (versionado)
-├── landmarks_nuevo/         # JSONs de correspondencias dataset 2 (versionado)
+├── photos/                  # Imágenes de entrada (no versionado)
+├── landmarks/               # JSONs de correspondencias (versionado)
 ├── output/                  # Videos generados (no versionado)
 └── .venv/                   # Entorno virtual (no versionado)
+
+# Directorios adicionales (creados por el usuario según el dataset):
+# photos_<nombre>/          # Imágenes de un dataset alternativo
+# landmarks_<nombre>/       # JSONs de correspondencias del dataset alternativo
 ```
 
 ---
@@ -626,7 +628,7 @@ python pipeline.py \
 
 | Problema | Solución |
 |----------|----------|
-| **Editor no carga las imágenes** | Verificar rutas en session.json o argumentos --image-a/--image-b. Usar rutas absolutas si es necesario. |
+| **Editor no carga las imágenes** | Verificar argumentos `--image-a`/`--image-b` o las rutas dentro del `session.json` generado por el pipeline. Usar rutas absolutas si es necesario. |
 | **Puntos guardados no aparecen en el siguiente render** | Verificar que el archivo JSON se guardó (presionar `S`). Revisar que el landmarks-dir es correcto. |
 | **Video sale pixelado** | Aumentar CRF (bajar de 24 a 18) o usar `--preset slow`. Revisar que los puntos de correspondencia son precisos. |
 | **Render muy lento** | Reducir FPS (ej: 30 en lugar de 60), aumentar `--crf` (24 en lugar de 18), usar `--preset medium`. |

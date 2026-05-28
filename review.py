@@ -132,7 +132,7 @@ def main():
         return 1
 
     # Build landmark_editor command
-    editor_cmd = ["python", "landmark_editor.py", "--session", str(session_file)]
+    editor_cmd = [sys.executable, "landmark_editor.py", "--session", str(session_file)]
 
     if display_width:
         editor_cmd.extend(["--display-width", str(display_width)])
