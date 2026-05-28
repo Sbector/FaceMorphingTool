@@ -195,7 +195,7 @@ class LandmarkEditor:
         # Load image paths from pair data
         image_a_path = pair_data.get('image_a')
         image_b_path = pair_data.get('image_b')
-        landmarks_json = pair_data.get('landmarks')
+        landmarks_json = pair_data.get('landmarks') or pair_data.get('output')
         
         if not image_a_path or not image_b_path:
             raise ValueError(f"Session pair {idx} missing image paths")
