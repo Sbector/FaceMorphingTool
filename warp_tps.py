@@ -21,7 +21,8 @@ def load_points_from_json(json_path):
         points_a: np.array (N, 2) in [x, y] format for source image
         points_b: np.array (N, 2) in [x, y] format for target image
     """
-    with open(json_path, 'r') as f:
+    # Some restored landmark files may include a UTF-8 BOM.
+    with open(json_path, 'r', encoding='utf-8-sig') as f:
         data = json.load(f)
     
     pairs = data['pairs']

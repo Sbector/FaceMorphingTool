@@ -305,7 +305,7 @@ class LandmarkEditor:
     def load_json(self):
         """Load correspondence points from existing JSON file."""
         try:
-            with open(self.output_json, 'r') as f:
+            with open(self.output_json, 'r', encoding='utf-8-sig') as f:
                 data = json.load(f)
             self.pairs = data.get('pairs', [])
             print(f"Loaded {len(self.pairs)} pairs from {self.output_json}")

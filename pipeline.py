@@ -75,7 +75,7 @@ def generate_inverse_json(src_path, dst_path):
         return False
     
     try:
-        with open(src_path, 'r', encoding='utf-8') as f:
+        with open(src_path, 'r', encoding='utf-8-sig') as f:
             data = json.load(f)
     except Exception as e:
         print(f"[ERROR] Failed to read {src_path}: {e}")

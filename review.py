@@ -19,6 +19,64 @@ from pathlib import Path
 from fnmatch import filter as fnmatch_filter
 
 
+def get_python_executable():
+    """Prefer the project venv Python so editor launch works even from system python."""
+    venv_python = Path(".venv/Scripts/python.exe")
+    if venv_python.exists():
+        return str(venv_python.resolve())
+    return sys.executable
+
+
+def load_review_entry(json_path, photos_dir):
+    with open(json_path, 'r', encoding='utf-8-sig') as file_handle:
+        landmark_data = json.load(file_handle)
+
+    image_a = landmark_data.get('image_a')
+    image_b = landmark_data.get('image_b')
+    if not image_a or not image_b:
+        raise ValueError("missing image_a or image_b in JSON")
+
+    image_a_path = photos_dir / Path(image_a).name
+    image_b_path = photos_dir / Path(image_b).name
+    if not image_a_path.exists():
+        raise FileNotFoundError(f"image not found: {image_a_path}")
+    if not image_b_path.exists():
+        raise FileNotFoundError(f"image not found: {image_b_path}")
+
+    pair_count = len(landmark_data.get('pairs', []))
+    unique_key = tuple(sorted((Path(image_a).name, Path(image_b).name)))
+    return {
+        "json_path": json_path,
+        "image_a_path": image_a_path.resolve(),
+        "image_b_path": image_b_path.resolve(),
+        "pair_count": pair_count,
+        "unique_key": unique_key,
+    }
+
+
+def dedupe_entries(entries):
+    selected = {}
+    pruned = []
+    for entry in entries:
+        existing = selected.get(entry["unique_key"])
+        if existing is None:
+            selected[entry["unique_key"]] = entry
+            continue
+
+        if entry["pair_count"] > existing["pair_count"]:
+            pruned.append(existing)
+            selected[entry["unique_key"]] = entry
+            continue
+
+        if entry["pair_count"] == existing["pair_count"] and entry["json_path"].name < existing["json_path"].name:
+            pruned.append(existing)
+            selected[entry["unique_key"]] = entry
+        else:
+            pruned.append(entry)
+
+    return sorted(selected.values(), key=lambda entry: entry["json_path"].name), sorted(pruned, key=lambda entry: entry["json_path"].name)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Review and edit all landmark pairs in batch session mode"
@@ -42,6 +100,21 @@ def main():
         "--filter",
         default="*.json",
         help="Filter landmark files by glob pattern (default: *.json)"
+    )
+    parser.add_argument(
+        "--unique-only",
+        action="store_true",
+        help="Review only one direction per image pair, preferring the file with more points"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print selected landmark files and exit without opening the editor"
+    )
+    parser.add_argument(
+        "--prune-inverses",
+        action="store_true",
+        help="Delete redundant inverse JSON files after unique-only selection so pipeline can regenerate them"
     )
 
     args = parser.parse_args()
@@ -73,45 +146,53 @@ def main():
 
     # Build session data
     session_pairs = []
+    review_entries = []
+    pruned_entries = []
 
     for json_path in filtered_jsons:
         try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                landmark_data = json.load(f)
-
-            # Extract image filenames from JSON
-            image_a = landmark_data.get('image_a')
-            image_b = landmark_data.get('image_b')
-
-            if not image_a or not image_b:
-                print(f"[SKIP] {json_path.name}: missing image_a or image_b in JSON")
-                continue
-
-            # Resolve image paths
-            image_a_path = photos_dir / Path(image_a).name
-            image_b_path = photos_dir / Path(image_b).name
-
-            # Verify images exist
-            if not image_a_path.exists():
-                print(f"[SKIP] {json_path.name}: image not found: {image_a_path}")
-                continue
-
-            if not image_b_path.exists():
-                print(f"[SKIP] {json_path.name}: image not found: {image_b_path}")
-                continue
-
-            # Add to session
-            session_pairs.append({
-                "image_a": str(image_a_path.resolve()),
-                "image_b": str(image_b_path.resolve()),
-                "landmarks": str(json_path.resolve())
-            })
+            entry = load_review_entry(json_path, photos_dir)
+            review_entries.append(entry)
 
             print(f"[OK] {json_path.name}")
 
         except Exception as e:
             print(f"[ERROR] {json_path.name}: {e}")
             continue
+
+    if args.unique_only:
+        unique_entries, pruned_entries = dedupe_entries(review_entries)
+        print(f"\n[INFO] Unique-only mode: {len(review_entries)} files -> {len(unique_entries)} unique pair(s)")
+        review_entries = unique_entries
+
+    if args.prune_inverses and not args.unique_only:
+        print("[ERROR] --prune-inverses requires --unique-only")
+        return 1
+
+    if args.prune_inverses:
+        print(f"[INFO] Prune-inverses mode: {len(pruned_entries)} redundant inverse file(s)")
+
+    if args.dry_run:
+        print("\n[INFO] Selected files:")
+        for entry in review_entries:
+            print(f"  - {entry['json_path'].name} ({entry['pair_count']} pairs)")
+        if args.prune_inverses and pruned_entries:
+            print("\n[INFO] Files to remove:")
+            for entry in pruned_entries:
+                print(f"  - {entry['json_path'].name} ({entry['pair_count']} pairs)")
+        return 0 if review_entries else 1
+
+    if args.prune_inverses:
+        for entry in pruned_entries:
+            entry["json_path"].unlink(missing_ok=True)
+            print(f"[PRUNE] Removed {entry['json_path'].name}")
+
+    for entry in review_entries:
+        session_pairs.append({
+            "image_a": str(entry["image_a_path"]),
+            "image_b": str(entry["image_b_path"]),
+            "landmarks": str(entry["json_path"].resolve())
+        })
 
     if not session_pairs:
         print("\n[ERROR] No valid pairs to review")
@@ -132,7 +213,7 @@ def main():
         return 1
 
     # Build landmark_editor command
-    editor_cmd = [sys.executable, "landmark_editor.py", "--session", str(session_file)]
+    editor_cmd = [get_python_executable(), "landmark_editor.py", "--session", str(session_file)]
 
     if display_width:
         editor_cmd.extend(["--display-width", str(display_width)])
