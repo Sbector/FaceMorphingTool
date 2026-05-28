@@ -82,6 +82,9 @@ class LandmarkEditor:
             session_json: str or None, session JSON file with list of pairs to edit
         """
         self.display_width = display_width  # None = auto-compute in _update_display_sizes
+        self._user_display_width = display_width  # Preserve user-specified width
+        self.maximize_mode = False  # Toggle for maximize mode (m key)
+        self.window_name = None  # Stored in run() for use in handle_key()
         self.session_json_path = Path(session_json) if session_json else None
         self.session_pairs = []  # For session mode
         self.current_session_idx = 0  # Current pair in session mode
@@ -253,30 +256,82 @@ class LandmarkEditor:
         self._update_display_sizes()
 
     @staticmethod
-    def _get_screen_size():
-        """Get screen dimensions (Windows). Fallback to 1920x1080 if unavailable."""
+    def _get_screen_metrics():
+        """Get screen metrics on Windows: (screen_w, screen_h, work_w, work_h, title_bar_h).
+        work_area = screen dimensions minus taskbar.
+        title_bar_h = window chrome height (title bar + frame).
+        Fallback: work_h = screen_h - 48, title_bar_h = 30.
+        """
         try:
             import ctypes
+            from ctypes import wintypes
             user32 = ctypes.windll.user32
+            
+            # Full screen dimensions
             screen_w = user32.GetSystemMetrics(0)
             screen_h = user32.GetSystemMetrics(1)
-            return screen_w, screen_h
+            
+            # Work area (screen minus taskbar)
+            # SPI_GETWORKAREA = 48 via SystemParametersInfoW
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", wintypes.LONG),
+                            ("top", wintypes.LONG),
+                            ("right", wintypes.LONG),
+                            ("bottom", wintypes.LONG)]
+            
+            work_rect = RECT()
+            SPI_GETWORKAREA = 48
+            user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work_rect), 0)
+            work_w = work_rect.right - work_rect.left
+            work_h = work_rect.bottom - work_rect.top
+            
+            # Title bar height: caption height + frame height
+            # SM_CYCAPTION = 4, SM_CYFIXEDFRAME = 8
+            title_h = user32.GetSystemMetrics(4) + user32.GetSystemMetrics(8)
+            
+            return screen_w, screen_h, work_w, work_h, title_h
         except:
-            return 1920, 1080
+            # Fallback: assume 48px taskbar, 30px title bar
+            return 1920, 1080, 1920, 1032, 30
     
     def _update_display_sizes(self):
-        """Update display image sizes and scaling factors."""
+        """Update display image sizes and scaling factors.
+        Recalculates display_width based on maximize_mode or user_display_width.
+        In maximize_mode, height drives the sizing; width is computed from aspect ratio.
+        In normal mode, width drives the sizing; height is computed from aspect ratio.
+        """
         h_a, w_a = self.img_a_orig.shape[:2]
         h_b, w_b = self.img_b_orig.shape[:2]
 
-        # Auto-compute display_width once (if not user-specified)
-        if self.display_width is None:
-            # Constrain by max panel height (based on screen size)
-            screen_w, screen_h = self._get_screen_size()
-            overhead = 40 + 35 + 25 + 60  # nav + help + status + taskbar
-            max_panel_h = screen_h - overhead
-            self.display_width = min(int(max_panel_h * w_a / h_a), (screen_w - 5) // 2)
-            self.display_width = max(200, self.display_width)  # Minimum 200px
+        # Get screen metrics
+        screen_w, screen_h, work_w, work_h, title_h = self._get_screen_metrics()
+        
+        # Calculate UI overhead (controls that take up vertical space)
+        # Nav bar only appears in session mode
+        ui_height = (40 if self.session_mode else 0) + 35 + 25  # nav (session only) + help + status
+        
+        # Max available height for image panels
+        max_panel_h = work_h - title_h - ui_height
+        
+        # Determine display width based on mode
+        if self.maximize_mode:
+            # Maximize mode: use maximum available height
+            # Width is computed from image aspect ratio: width = height * (orig_w / orig_h)
+            # Use minimum width to fit both images
+            width_a = int(max_panel_h * w_a / h_a)
+            width_b = int(max_panel_h * w_b / h_b)
+            self.display_width = min(width_a, width_b, (work_w - 5) // 2)
+        elif self._user_display_width is not None:
+            # User-specified width (from CLI arg)
+            self.display_width = self._user_display_width
+        else:
+            # Auto-size: constrain by available height
+            # Width from aspect ratio for each image, take minimum
+            width_a = int(max_panel_h * w_a / h_a)
+            width_b = int(max_panel_h * w_b / h_b)
+            self.display_width = min(width_a, width_b, (work_w - 5) // 2)
+        
+        self.display_width = max(200, self.display_width)  # Minimum 200px
 
         # Scale factors at zoom=1.0
         self.scale_a = self.display_width / w_a
@@ -285,20 +340,46 @@ class LandmarkEditor:
         # Fixed display height (base, zoom=1.0)
         new_h_a = int(h_a * self.scale_a)
         new_h_b = int(h_b * self.scale_b)
-        self.img_a_disp = cv2.resize(self.img_a_orig, (self.display_width, new_h_a))
-        self.img_b_disp = cv2.resize(self.img_b_orig, (self.display_width, new_h_b))
+        
+        # Panel width: in maximize mode, panels fill screen width; in normal mode, panel = image width
+        if self.maximize_mode:
+            self.panel_width = (work_w - 5) // 2  # Each panel is half the screen width (minus separator)
+        else:
+            self.panel_width = self.display_width
+        
+        # Resize images to display_width first
+        img_a_temp = cv2.resize(self.img_a_orig, (self.display_width, new_h_a))
+        img_b_temp = cv2.resize(self.img_b_orig, (self.display_width, new_h_b))
 
-        # Pad both panels to same height for side-by-side display
+        # Pad to panel_width if needed (for maximize mode), centered horizontally
+        if self.panel_width > self.display_width:
+            pad_w_a = self.panel_width - self.display_width
+            pad_left_a = pad_w_a // 2
+            pad_right_a = pad_w_a - pad_left_a
+            img_a_temp = cv2.copyMakeBorder(img_a_temp, 0, 0, pad_left_a, pad_right_a, cv2.BORDER_CONSTANT, (48, 48, 48))
+            pad_w_b = self.panel_width - self.display_width
+            pad_left_b = pad_w_b // 2
+            pad_right_b = pad_w_b - pad_left_b
+            img_b_temp = cv2.copyMakeBorder(img_b_temp, 0, 0, pad_left_b, pad_right_b, cv2.BORDER_CONSTANT, (48, 48, 48))
+        
+        self.img_a_disp = img_a_temp
+        self.img_b_disp = img_b_temp
+
+        # Pad both panels to same height for side-by-side display (vertically centered)
         max_h = max(new_h_a, new_h_b)
         if new_h_a < max_h:
-            pad = max_h - new_h_a
-            self.img_a_disp = cv2.copyMakeBorder(self.img_a_disp, 0, pad, 0, 0, cv2.BORDER_CONSTANT, (48, 48, 48))
+            pad_total = max_h - new_h_a
+            pad_top = pad_total // 2
+            pad_bottom = pad_total - pad_top
+            self.img_a_disp = cv2.copyMakeBorder(self.img_a_disp, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, (48, 48, 48))
         if new_h_b < max_h:
-            pad = max_h - new_h_b
-            self.img_b_disp = cv2.copyMakeBorder(self.img_b_disp, 0, pad, 0, 0, cv2.BORDER_CONSTANT, (48, 48, 48))
+            pad_total = max_h - new_h_b
+            pad_top = pad_total // 2
+            pad_bottom = pad_total - pad_top
+            self.img_b_disp = cv2.copyMakeBorder(self.img_b_disp, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, (48, 48, 48))
 
         self.disp_h, _ = self.img_a_disp.shape[:2]
-
+        
         # Separator (vertical divider between panels)
         self.separator = np.ones((self.disp_h, 5, 3), dtype=np.uint8) * 128
     
@@ -332,8 +413,9 @@ class LandmarkEditor:
             print(f"[ERROR] Failed to save: {e}")
     
     def point_in_image_a(self, x, y):
-        """Check if point is in left (A) half of display (x in image-local coords)."""
-        return x < self.display_width
+        """Check if point is in left (A) panel (x in screen coords)."""
+        eff_w, eff_h, x_off, y_off = self._eff_dims_a()
+        return x_off <= x < x_off + eff_w
 
     @property
     def nav_offset(self):
@@ -362,8 +444,43 @@ class LandmarkEditor:
         cy = h_b / 2 + self.pan_by
         return cx - view_w / 2, cy - view_h / 2, view_w, view_h
 
+    def _eff_dims(self, zoom, orig_w, orig_h):
+        """Calculate effective render size (maintaining aspect ratio) and centering offsets.
+        Returns (eff_w, eff_h, x_off, y_off) where offsets center the image in the panel.
+        Note: eff_h may exceed disp_h; render will clip it. Width is not recalculated based on height.
+        """
+        eff_w = min(int(self.display_width * zoom), self.panel_width)
+        eff_h = int(eff_w * orig_h / orig_w)
+        # Do NOT recalculate eff_w when eff_h > disp_h; let render handle clipping
+        eff_w = max(1, eff_w)
+        eff_h = max(1, eff_h)
+        x_off = (self.panel_width - eff_w) // 2
+        y_off = (self.disp_h - eff_h) // 2
+        return eff_w, eff_h, x_off, y_off
+
+    def _eff_dims_a(self, zoom=None):
+        if zoom is None:
+            zoom = self.zoom_a
+        h, w = self.img_a_orig.shape[:2]
+        return self._eff_dims(zoom, w, h)
+
+    def _eff_dims_b(self, zoom=None):
+        if zoom is None:
+            zoom = self.zoom_b
+        h, w = self.img_b_orig.shape[:2]
+        return self._eff_dims(zoom, w, h)
+
+    def _eff_w_a(self):
+        return self._eff_dims_a()[0]
+
+    def _eff_w_b(self):
+        return self._eff_dims_b()[0]
+
     def _render_panel(self, img_orig, zoom, pan_x, pan_y):
-        """Render a zoomed/panned panel to fixed display_width x disp_h size."""
+        """Render a zoomed/panned panel to panel_width x disp_h size.
+        Effective image width scales with zoom up to panel_width (fills available space when zoomed).
+        Returns array of size (disp_h, panel_width, 3) with gray padding on right if needed.
+        """
         h, w = img_orig.shape[:2]
         view_w = w / zoom
         view_h = h / zoom
@@ -380,20 +497,37 @@ class LandmarkEditor:
         x2c = min(float(w), x2)
         y2c = min(float(h), y2)
 
-        # Gray background for out-of-bounds regions
-        out = np.full((self.disp_h, self.display_width, 3), 48, dtype=np.uint8)
+        # Effective dimensions (maintaining aspect ratio), centered in panel
+        eff_w, eff_h, x_off, y_off = self._eff_dims(zoom, w, h)
+
+        out = np.full((self.disp_h, self.panel_width, 3), 48, dtype=np.uint8)
 
         if x1c < x2c and y1c < y2c:
             crop = img_orig[int(y1c):int(y2c), int(x1c):int(x2c)]
             if crop.size > 0:
-                ox1 = int((x1c - x1) / view_w * self.display_width)
-                oy1 = int((y1c - y1) / view_h * self.disp_h)
-                ox2 = int((x2c - x1) / view_w * self.display_width)
-                oy2 = int((y2c - y1) / view_h * self.disp_h)
+                ox1 = int((x1c - x1) / view_w * eff_w)
+                oy1 = int((y1c - y1) / view_h * eff_h)
+                ox2 = int((x2c - x1) / view_w * eff_w)
+                oy2 = int((y2c - y1) / view_h * eff_h)
                 out_w = max(1, ox2 - ox1)
                 out_h = max(1, oy2 - oy1)
                 resized = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
-                out[oy1:oy1 + out_h, ox1:ox1 + out_w] = resized[:out_h, :out_w]
+                px = x_off + ox1
+                py = y_off + oy1
+                
+                # Clip to output bounds (eff_h may exceed disp_h, eff_w may equal panel_width)
+                py_out = max(0, py)
+                px_out = max(0, px)
+                py_out_end = min(self.disp_h, py + out_h)
+                px_out_end = min(self.panel_width, px + out_w)
+                
+                if py_out < py_out_end and px_out < px_out_end:
+                    # Map to corresponding region in resized
+                    py_res = max(0, -py)
+                    px_res = max(0, -px)
+                    py_res_end = py_res + (py_out_end - py_out)
+                    px_res_end = px_res + (px_out_end - px_out)
+                    out[py_out:py_out_end, px_out:px_out_end] = resized[py_res:py_res_end, px_res:px_res_end]
 
         return out
 
@@ -404,29 +538,33 @@ class LandmarkEditor:
     def pixel_to_orig_a(self, x_disp, y_disp):
         """Convert display panel-A coords to original image A coords."""
         x1, y1, view_w, view_h = self._view_rect_a()
-        x_orig = x_disp / self.display_width * view_w + x1
-        y_orig = y_disp / self.disp_h * view_h + y1
+        eff_w, eff_h, x_off, y_off = self._eff_dims_a()
+        x_orig = (x_disp - x_off) / eff_w * view_w + x1
+        y_orig = (y_disp - y_off) / eff_h * view_h + y1
         return [x_orig, y_orig]
 
     def pixel_to_orig_b(self, x_disp, y_disp):
         """Convert display panel-B coords to original image B coords."""
         x1, y1, view_w, view_h = self._view_rect_b()
-        x_orig = x_disp / self.display_width * view_w + x1
-        y_orig = y_disp / self.disp_h * view_h + y1
+        eff_w, eff_h, x_off, y_off = self._eff_dims_b()
+        x_orig = (x_disp - x_off) / eff_w * view_w + x1
+        y_orig = (y_disp - y_off) / eff_h * view_h + y1
         return [x_orig, y_orig]
 
     def orig_to_disp_a(self, x_orig, y_orig):
         """Convert original image A coords to canvas display coords."""
         x1, y1, view_w, view_h = self._view_rect_a()
-        x_disp = int((x_orig - x1) / view_w * self.display_width)
-        y_disp = int((y_orig - y1) / view_h * self.disp_h)
+        eff_w, eff_h, x_off, y_off = self._eff_dims_a()
+        x_disp = int((x_orig - x1) / view_w * eff_w) + x_off
+        y_disp = int((y_orig - y1) / view_h * eff_h) + y_off
         return x_disp, y_disp
 
     def orig_to_disp_b(self, x_orig, y_orig):
         """Convert original image B coords to canvas display coords."""
         x1, y1, view_w, view_h = self._view_rect_b()
-        x_disp = int((x_orig - x1) / view_w * self.display_width) + self.display_width + 5
-        y_disp = int((y_orig - y1) / view_h * self.disp_h)
+        eff_w, eff_h, x_off, y_off = self._eff_dims_b()
+        x_disp = int((x_orig - x1) / view_w * eff_w) + x_off + self.panel_width + 5
+        y_disp = int((y_orig - y1) / view_h * eff_h) + y_off
         return x_disp, y_disp
     
     def find_closest_point(self, x_disp, y_disp, radius_px=15):
@@ -474,10 +612,10 @@ class LandmarkEditor:
                     # Start point in A
                     self.pending_a = self.pixel_to_orig_a(x, y)
                     print(f"  Point A placed. Click on right image for point B.")
-                else:
+                elif x > self.panel_width + 5 and x <= self.panel_width + 5 + self.panel_width:
                     # Complete point in B (if pending_a exists)
                     if self.pending_a:
-                        x_b_disp = x - (self.display_width + 5)
+                        x_b_disp = x - (self.panel_width + 5)
                         y_b_disp = y
                         point_b = self.pixel_to_orig_b(x_b_disp, y_b_disp)
 
@@ -513,8 +651,8 @@ class LandmarkEditor:
                     pair['a'] = self.pixel_to_orig_a(x, y)
                     self.dirty = True
             else:  # 'b'
-                if not self.point_in_image_a(x, y):
-                    x_b_disp = x - (self.display_width + 5)
+                if x > self.panel_width + 5 and x <= self.panel_width + 5 + self.panel_width:
+                    x_b_disp = x - (self.panel_width + 5)
                     y_b_disp = y
                     pair['b'] = self.pixel_to_orig_b(x_b_disp, y_b_disp)
                     self.dirty = True
@@ -523,27 +661,31 @@ class LandmarkEditor:
         """Zoom in/out centered on cursor position (x,y in window coords)."""
         y = y - self.nav_offset
         factor = 1.25 if zoom_in else 1 / 1.25
-        in_panel_b = x > self.display_width + 5
-        in_panel_a = x < self.display_width
+        in_panel_b = x > self.panel_width + 5
+        in_panel_a = x < self.panel_width
 
         def apply_zoom(zoom_old, pan_x, pan_y, img_orig, x_local):
             h, w = img_orig.shape[:2]
             new_zoom = max(1.0, min(8.0, zoom_old * factor))
             if new_zoom == zoom_old:
                 return zoom_old, pan_x, pan_y
+            
+            eff_w_old, eff_h_old, x_off_old, y_off_old = self._eff_dims(zoom_old, w, h)
+            eff_w_new, eff_h_new, x_off_new, y_off_new = self._eff_dims(new_zoom, w, h)
+            
             # Cursor in original image coords
             x1, y1, view_w, view_h = (lambda vr: vr)(
                 (w / 2 + pan_x - w / (2 * zoom_old),
                  h / 2 + pan_y - h / (2 * zoom_old),
                  w / zoom_old, h / zoom_old))
-            cx_orig = x_local / self.display_width * view_w + x1
-            cy_orig = y / self.disp_h * view_h + y1
+            cx_orig = (x_local - x_off_old) / eff_w_old * view_w + x1
+            cy_orig = (y - y_off_old) / eff_h_old * view_h + y1
             # New view size
             new_view_w = w / new_zoom
             new_view_h = h / new_zoom
             # Keep cursor at same screen position → solve for new center
-            new_x1 = cx_orig - (x_local / self.display_width) * new_view_w
-            new_y1 = cy_orig - (y / self.disp_h) * new_view_h
+            new_x1 = cx_orig - ((x_local - x_off_new) / eff_w_new) * new_view_w
+            new_y1 = cy_orig - ((y - y_off_new) / eff_h_new) * new_view_h
             new_cx = new_x1 + new_view_w / 2
             new_cy = new_y1 + new_view_h / 2
             return new_zoom, new_cx - w / 2, new_cy - h / 2
@@ -552,7 +694,7 @@ class LandmarkEditor:
             self.zoom_a, self.pan_ax, self.pan_ay = apply_zoom(
                 self.zoom_a, self.pan_ax, self.pan_ay, self.img_a_orig, x)
         elif in_panel_b:
-            x_local = x - (self.display_width + 5)
+            x_local = x - (self.panel_width + 5)
             self.zoom_b, self.pan_bx, self.pan_by = apply_zoom(
                 self.zoom_b, self.pan_bx, self.pan_by, self.img_b_orig, x_local)
 
@@ -560,7 +702,7 @@ class LandmarkEditor:
         """Begin middle-button pan drag."""
         self.mid_drag_active = True
         self.mid_drag_start = (x, y - self.nav_offset)
-        self.mid_drag_panel = 'a' if x < self.display_width else 'b'
+        self.mid_drag_panel = 'a' if x < self.panel_width else 'b'
         self.mid_drag_pan_start = (self.pan_ax, self.pan_ay, self.pan_bx, self.pan_by)
 
     def handle_mid_drag(self, x, y):
@@ -572,17 +714,19 @@ class LandmarkEditor:
         dy_screen = y_adj - self.mid_drag_start[1]
 
         if self.mid_drag_panel == 'a':
+            eff_w, eff_h, x_off, y_off = self._eff_dims_a()
             h_a, w_a = self.img_a_orig.shape[:2]
             view_w = w_a / self.zoom_a
             view_h = h_a / self.zoom_a
-            self.pan_ax = self.mid_drag_pan_start[0] - dx_screen / self.display_width * view_w
-            self.pan_ay = self.mid_drag_pan_start[1] - dy_screen / self.disp_h * view_h
+            self.pan_ax = self.mid_drag_pan_start[0] - dx_screen / eff_w * view_w
+            self.pan_ay = self.mid_drag_pan_start[1] - dy_screen / eff_h * view_h
         else:
+            eff_w, eff_h, x_off, y_off = self._eff_dims_b()
             h_b, w_b = self.img_b_orig.shape[:2]
             view_w = w_b / self.zoom_b
             view_h = h_b / self.zoom_b
-            self.pan_bx = self.mid_drag_pan_start[2] - dx_screen / self.display_width * view_w
-            self.pan_by = self.mid_drag_pan_start[3] - dy_screen / self.disp_h * view_h
+            self.pan_bx = self.mid_drag_pan_start[2] - dx_screen / eff_w * view_w
+            self.pan_by = self.mid_drag_pan_start[3] - dy_screen / eff_h * view_h
     
     def handle_key(self, key):
         """Handle keyboard input."""
@@ -641,6 +785,22 @@ class LandmarkEditor:
             self.pan_bx = 0.0
             self.pan_by = 0.0
             print("  Zoom reset")
+        elif key == ord('m'):
+            # Toggle maximize mode
+            self.maximize_mode = not self.maximize_mode
+            # Reset zoom/pan when toggling mode
+            self.zoom_a = 1.0
+            self.pan_ax = 0.0
+            self.pan_ay = 0.0
+            self.zoom_b = 1.0
+            self.pan_bx = 0.0
+            self.pan_by = 0.0
+            # Recalculate display sizes
+            self._update_display_sizes()
+            # Re-anchor window to top-left
+            cv2.moveWindow(self.window_name, 0, 0)
+            mode_str = "MAXIMIZED" if self.maximize_mode else "normal"
+            print(f"  Mode: {mode_str}  Panel width: {self.display_width}px")
         elif key == ord('n'):
             if self.session_mode:
                 if self.dirty:
@@ -740,13 +900,15 @@ class LandmarkEditor:
 
             # Draw point A (with bounds-check)
             x_a, y_a = self.orig_to_disp_a(pair['a'][0], pair['a'][1])
-            if 0 <= x_a < self.display_width and 0 <= y_a < self.disp_h:
+            eff_w_a, eff_h_a, x_off_a, y_off_a = self._eff_dims_a()
+            if x_off_a <= x_a < x_off_a + eff_w_a and y_off_a <= y_a < y_off_a + eff_h_a:
                 cv2.circle(canvas, (x_a, y_a), 8, color, -1)
                 cv2.putText(canvas, str(i+1), (x_a-5, y_a+5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
             # Draw point B (with bounds-check)
             x_b, y_b = self.orig_to_disp_b(pair['b'][0], pair['b'][1])
-            if self.display_width + 5 <= x_b < 2*self.display_width + 5 and 0 <= y_b < self.disp_h:
+            eff_w_b, eff_h_b, x_off_b, y_off_b = self._eff_dims_b()
+            if self.panel_width + 5 + x_off_b <= x_b < self.panel_width + 5 + x_off_b + eff_w_b and y_off_b <= y_b < y_off_b + eff_h_b:
                 cv2.circle(canvas, (x_b, y_b), 8, color, -1)
                 cv2.putText(canvas, str(i+1), (x_b-5, y_b+5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -754,7 +916,8 @@ class LandmarkEditor:
         if self.pending_a is not None:
             if (self.frame_count // 8) % 2 == 0:
                 x_a, y_a = self.orig_to_disp_a(self.pending_a[0], self.pending_a[1])
-                if 0 <= x_a < self.display_width and 0 <= y_a < self.disp_h:
+                eff_w_a, eff_h_a, x_off_a, y_off_a = self._eff_dims_a()
+                if x_off_a <= x_a < x_off_a + eff_w_a and y_off_a <= y_a < y_off_a + eff_h_a:
                     cv2.circle(canvas, (x_a, y_a), 8, (0, 255, 255), -1)  # yellow
 
         # Hover highlight: white ring around nearest point (with bounds-check)
@@ -766,11 +929,13 @@ class LandmarkEditor:
                     pair = self.pairs[h_idx]
                     if h_side == 'a':
                         hx, hy = self.orig_to_disp_a(pair['a'][0], pair['a'][1])
-                        if 0 <= hx < self.display_width and 0 <= hy < self.disp_h:
+                        eff_w_a, eff_h_a, x_off_a, y_off_a = self._eff_dims_a()
+                        if x_off_a <= hx < x_off_a + eff_w_a and y_off_a <= hy < y_off_a + eff_h_a:
                             cv2.circle(canvas, (hx, hy), 13, (255, 255, 255), 2)
                     else:
                         hx, hy = self.orig_to_disp_b(pair['b'][0], pair['b'][1])
-                        if self.display_width + 5 <= hx < 2*self.display_width + 5 and 0 <= hy < self.disp_h:
+                        eff_w_b, eff_h_b, x_off_b, y_off_b = self._eff_dims_b()
+                        if self.panel_width + 5 + x_off_b <= hx < self.panel_width + 5 + x_off_b + eff_w_b and y_off_b <= hy < y_off_b + eff_h_b:
                             cv2.circle(canvas, (hx, hy), 13, (255, 255, 255), 2)
 
         # Nav bar (40px, session mode only) – prepend at top
@@ -784,7 +949,7 @@ class LandmarkEditor:
 
         # Help bar
         help_bg = np.zeros((35, canvas.shape[1], 3), dtype=np.uint8)
-        help_text = "LClick=Place RClick=Select Drag=Move  MidDrag=Pan  Ctrl+Scroll=Zoom  Esc=Cancel  z=ResetZoom  s=Save u=Undo d=Del a=AutoSeed(confirm!) r=Reset q=Quit"
+        help_text = "LClick=Place RClick=Select Drag=Move  MidDrag=Pan  Ctrl+Scroll=Zoom  m=Maximize  z=ResetZoom  s=Save u=Undo d=Del a=AutoSeed(confirm!) r=Reset q=Quit"
         cv2.putText(help_bg, help_text, (6, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
         canvas = np.vstack([canvas, help_bg])
 
@@ -808,6 +973,7 @@ class LandmarkEditor:
         else:
             window_name = f"Landmark Editor: {self.image_a_path.name} <-> {self.image_b_path.name}"
         
+        self.window_name = window_name  # Store for use in handle_key()
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
         cv2.moveWindow(window_name, 0, 0)  # Position at top-left corner
         

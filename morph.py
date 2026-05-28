@@ -12,8 +12,6 @@ import cv2
 import numpy as np
 
 from detect import detect_landmarks_batch, validate_landmarks_quality, load_images_batch
-from warp import generate_morph_frames
-from warp_optical_flow import generate_morph_frames_optical_flow
 from warp_tps import generate_morph_frames_tps, load_points_from_json
 from video_writer import write_video
 
@@ -224,11 +222,8 @@ def load_landmarks_cache(cache_path):
 
 
 def create_frame_generators(
-    filenames, images, landmarks, fps, transition_duration, hold_duration, 
-    backend='delaunay',
+    filenames, images, landmarks, fps, transition_duration, hold_duration,
     points_dir='landmarks',
-    flow_attachment=15, flow_tightness=0.3, flow_max_disp=None, flow_smooth=5,
-    flow_use_mask=True,
     mode='sequential',
     eulerian_circuit=None
 ):
@@ -260,24 +255,10 @@ def create_frame_generators(
     trans_frames = max(1, int(round(transition_duration * fps)))
     
     print(f"Frame counts: hold={hold_frames}, transition={trans_frames}")
-    print(f"Backend: {backend}")
-    print(f"Mode: {mode}")
-    if backend == 'opticalflow':
-        print(f"  TVL1: attachment={flow_attachment}, tightness={flow_tightness}")
-        print(f"  Flow: max_disp={flow_max_disp or 'auto'}, smooth={flow_smooth}, use_mask={flow_use_mask}\n")
-    elif backend == 'tps':
-        print(f"  Points directory: {points_dir}\n")
-    else:
-        print()
+    print(f"Points directory: {points_dir}\n")
     
-    # Select morph function based on backend
-    if backend == 'opticalflow':
-        morph_func = generate_morph_frames_optical_flow
-    elif backend == 'tps':
-        morph_func = generate_morph_frames_tps
-    else:
-        # Default to delaunay
-        morph_func = generate_morph_frames
+    # TPS morphing function
+    morph_func = generate_morph_frames_tps
     
     # Determine pairs based on mode
     if mode == 'all-pairs':
@@ -323,51 +304,33 @@ def create_frame_generators(
         # Emit transition frames (morphing)
         print(f"Morph {current_file} -> {next_file} ({trans_frames} frames)")
         
-        # Generate frames based on backend
-        if backend == 'opticalflow':
-            # Optical flow with parameters
-            for frame in morph_func(
-                img_current, img_next, trans_frames,
-                landmarks_a=lm_current, landmarks_b=lm_next,
-                attachment=flow_attachment,
-                tightness=flow_tightness,
-                max_displacement=flow_max_disp,
-                smooth_kernel=flow_smooth,
-                use_face_mask=flow_use_mask
-            ):
-                yield frame
-        elif backend == 'tps':
-            # TPS with correspondence points from JSON
-            stem_current = Path(current_file).stem
-            stem_next = Path(next_file).stem
-            
-            # Try to load correspondence points with fallback
-            json_path = Path(points_dir) / f"{stem_current}_{stem_next}.json"
-            json_path_rev = Path(points_dir) / f"{stem_next}_{stem_current}.json"
-            
-            pts_a = None
-            pts_b = None
-            
-            if json_path.exists():
-                pts_a, pts_b = load_points_from_json(str(json_path))
-                print(f"  Loaded correspondence from {json_path.name}")
-            elif json_path_rev.exists():
-                pts_a, pts_b = load_points_from_json(str(json_path_rev))
-                # Reverse the points since we loaded them backwards
-                pts_a, pts_b = pts_b, pts_a
-                print(f"  Loaded reversed correspondence from {json_path_rev.name}")
-            else:
-                raise FileNotFoundError(
-                    f"Correspondence points not found: {json_path} or {json_path_rev}\n"
-                    f"Run: python landmark_editor.py --image-a {current_file} --image-b {next_file}"
-                )
-            
-            for frame in morph_func(img_current, img_next, pts_a, pts_b, trans_frames):
-                yield frame
+        # TPS with correspondence points from JSON
+        stem_current = Path(current_file).stem
+        stem_next = Path(next_file).stem
+        
+        # Try to load correspondence points with fallback
+        json_path = Path(points_dir) / f"{stem_current}_{stem_next}.json"
+        json_path_rev = Path(points_dir) / f"{stem_next}_{stem_current}.json"
+        
+        pts_a = None
+        pts_b = None
+        
+        if json_path.exists():
+            pts_a, pts_b = load_points_from_json(str(json_path))
+            print(f"  Loaded correspondence from {json_path.name}")
+        elif json_path_rev.exists():
+            pts_a, pts_b = load_points_from_json(str(json_path_rev))
+            # Reverse the points since we loaded them backwards
+            pts_a, pts_b = pts_b, pts_a
+            print(f"  Loaded reversed correspondence from {json_path_rev.name}")
         else:
-            # Delaunay uses landmarks
-            for frame in morph_func(img_current, lm_current, img_next, lm_next, trans_frames):
-                yield frame
+            raise FileNotFoundError(
+                f"Correspondence points not found: {json_path} or {json_path_rev}\n"
+                f"Run: python landmark_editor.py --image-a {current_file} --image-b {next_file}"
+            )
+        
+        for frame in morph_func(img_current, img_next, pts_a, pts_b, trans_frames):
+            yield frame
 
 
 def main():
@@ -405,10 +368,7 @@ Examples:
                         help='Render profile: preview (fast) or final (quality)')
     
     # Backend
-    parser.add_argument('--backend', type=str, choices=['delaunay', 'opticalflow', 'tps'], default='delaunay',
-                        help='Morphing backend: delaunay (landmark-based), opticalflow (motion-based), tps (manual correspondence)')
-    
-    # TPS parameters
+    # TPS is the only supported backend now
     parser.add_argument('--points-dir', type=str, default='landmarks',
                         help='Directory containing correspondence JSON files for TPS backend')
     
@@ -439,18 +399,6 @@ Examples:
     # Morphing sequence mode
     parser.add_argument('--mode', type=str, choices=['sequential', 'all-pairs'], default='sequential',
                         help='Morphing sequence: sequential (img[0]->img[1]->...) or all-pairs (Eulerian circuit)')
-    
-    # Optical flow parameters
-    parser.add_argument('--flow-attachment', type=float, default=15,
-                        help='TVL1 attachment parameter (higher - stronger data fidelity)')
-    parser.add_argument('--flow-tightness', type=float, default=0.3,
-                        help='TVL1 tightness parameter (higher - more regularization)')
-    parser.add_argument('--flow-max-disp', type=float, default=None,
-                        help='Max optical flow displacement (pixels). If None, auto-compute as 10% of image')
-    parser.add_argument('--flow-smooth', type=int, default=5,
-                        help='Median filter kernel size for flow smoothing (odd number, 1-no smoothing)')
-    parser.add_argument('--flow-no-mask', action='store_true',
-                        help='Disable face mask stabilization for optical flow')
     
     args = parser.parse_args()
     
@@ -486,14 +434,12 @@ Examples:
         print(f"Error: Photo directory not found: {photo_dir}")
         return 1
     
-    # Generate output path dynamically based on backend and mode
+    # Generate output path dynamically based on mode
     output_base = args.output if args.output != 'output/morph.mp4' else None
     if output_base is None:
-        # Use default but add backend suffix
-        backend_suffix = '' if args.backend == 'delaunay' else f'_{args.backend}'
-        # Add mode suffix if all-pairs
+        # Use default with mode suffix (TPS is implicit)
         mode_suffix = '_eulerian' if args.mode == 'all-pairs' else ''
-        output_path = Path(f"output/morph{backend_suffix}{mode_suffix}.mp4")
+        output_path = Path(f"output/morph{mode_suffix}.mp4")
     else:
         # User provided custom output path
         if args.mode == 'all-pairs':
@@ -508,8 +454,7 @@ Examples:
             output_path = Path(output_base)
     
     try:
-        print(f"Face Morpher - {args.profile.upper()} profile")
-        print(f"Backend: {args.backend}")
+        print(f"Face Morpher - TPS backend, {args.profile.upper()} profile")
         print(f"Mode: {args.mode}")
         print(f"Output: {args.width}x{args.height} @ {fps} fps")
         print(f"Encoding: CRF {crf}, preset {preset}\n")
@@ -568,13 +513,7 @@ Examples:
         frame_gen = create_frame_generators(
             filenames, images_norm, landmarks_norm,
             fps=fps, transition_duration=duration, hold_duration=hold,
-            backend=args.backend,
             points_dir=args.points_dir,
-            flow_attachment=args.flow_attachment,
-            flow_tightness=args.flow_tightness,
-            flow_max_disp=args.flow_max_disp,
-            flow_smooth=args.flow_smooth,
-            flow_use_mask=not args.flow_no_mask,
             mode=args.mode,
             eulerian_circuit=eulerian_circuit
         )

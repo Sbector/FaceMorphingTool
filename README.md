@@ -16,12 +16,11 @@ Herramienta para generar videos de morphing facial de alta calidad a partir de f
 8. [Generación automática de landmarks](#generación-automática-de-landmarks)
 9. [Auto-inversión de pares](#auto-inversión-de-pares)
 10. [Parámetros de calidad de video](#parámetros-de-calidad-de-video)
-11. [Backends de morphing](#backends-de-morphing)
-12. [Referencia de argumentos CLI](#referencia-de-argumentos-cli)
-13. [Estructura del proyecto](#estructura-del-proyecto)
-14. [Recuperación y validación post-migración](#recuperación-y-validación-post-migración)
-15. [Ejemplos completos](#ejemplos-completos)
-16. [Solución de problemas](#solución-de-problemas)
+11. [Referencia de argumentos CLI](#referencia-de-argumentos-cli)
+12. [Estructura del proyecto](#estructura-del-proyecto)
+13. [Recuperación y validación post-migración](#recuperación-y-validación-post-migración)
+14. [Ejemplos completos](#ejemplos-completos)
+15. [Solución de problemas](#solución-de-problemas)
 
 ---
 
@@ -88,7 +87,6 @@ python pipeline.py [opciones]
   --landmarks-dir DIR     Directorio de JSONs            (por defecto: landmarks)
   --output ARCHIVO        Video de salida                (por defecto: output/morph.mp4)
   --mode MODE             sequential | all-pairs
-  --backend BACKEND       tps | delaunay | opticalflow   (por defecto: tps)
   --profile PERFIL        preview | final
   --skip-editor           Omitir editor de landmarks
   --skip-timing           Omitir editor de tiempos
@@ -385,7 +383,6 @@ python morph.py \
   --photos photos \
   --points-dir landmarks \
   --output output/morph_final.mp4 \
-  --backend tps \
   --fps 60 \
   --duration 1.4 \
   --hold 0.4 \
@@ -421,55 +418,7 @@ ultrafast → superfast → veryfast → faster → fast → medium → slow →
 
 Para uso general: `medium` (preview) o `slow` (final con máxima compresión).
 
----
 
-## 🔄 Backends de morphing
-
-### TPS (Thin Plate Splines) — Recomendado ⭐
-
-```bash
---backend tps
-```
-
-Usa correspondencias manuales/automáticas de JSONs. Produce morphing suave y controlable. Requiere archivos JSON en el directorio de landmarks.
-
-**Factores de calidad TPS:**
-- Número de puntos de correspondencia (más puntos = más control fino)
-- Distribución uniforme de puntos por toda la cara
-- 8 puntos ancla de borde se añaden automáticamente para estabilizar el fondo
-- RBF kernel: `thin_plate_spline` (matemáticamente óptimo)
-- Interpolación por frame: suavizado con easing `smoothstep`
-
-**Recomendación:** 30–50 puntos para faces normales, 60+ para caras complejas o rasgos muy particulares.
-
-### Delaunay
-
-```bash
---backend delaunay
-```
-
-Triangulación de Delaunay sobre landmarks de MediaPipe. Rápido, sin JSON necesario, automático.
-
-**Ventajas:** Sin edición manual requerida, ejecución rápida.
-**Desventajas:** Menos control fino que TPS, posibles artefactos en zonas complejas.
-
-### Optical Flow (TVL1)
-
-```bash
---backend opticalflow [opciones]
-```
-
-Calcula flujo óptico entre imágenes. Útil cuando no hay cara clara o se necesita morphing sin correspondencias.
-
-| Parámetro | Por defecto | Descripción |
-|-----------|-------------|-------------|
-| `--flow-attachment` | 15 | Fidelidad a los datos (mayor = más adherencia) |
-| `--flow-tightness` | 0.3 | Regularización (mayor = más suave) |
-| `--flow-max-disp` | auto (10%) | Desplazamiento máximo en píxeles |
-| `--flow-smooth` | 5 | Kernel de suavizado Gaussiano |
-| `--flow-no-mask` | False | Desactivar máscara facial |
-
----
 
 ## 📚 Referencia de argumentos CLI
 
@@ -504,7 +453,6 @@ python morph.py [opciones]
 --hold SEG                Tiempo estático por imagen
 --crf N                   Calidad H.264 (0–51)
 --preset STR              Preset ffmpeg
---backend BACKEND         tps | delaunay | opticalflow          [tps]
 --mode MODE               sequential | all-pairs                [sequential]
 --profile PERFIL          preview | final
 --order "a,b,c"           Orden manual de imágenes
@@ -568,18 +516,15 @@ face_morpher/
 ├── morph.py                 # Motor de render de video
 ├── landmark_editor.py       # Editor interactivo de correspondencias
 ├── timing_editor.py         # Editor visual de tiempos (duración/hold/fps)
-├── review.py                # Revisor de lotes de landmarks (NUEVO)
+├── review.py                # Revisor de lotes de landmarks
 ├── detect.py                # Detección MediaPipe de landmarks
 ├── warp_tps.py              # Backend TPS (Thin Plate Splines)
-├── warp.py                  # Backend Delaunay
-├── warp_optical_flow.py     # Backend flujo óptico
 ├── auto_landmarks.py        # Generación automática en batch
 ├── video_writer.py          # Encoder H.264 con ffmpeg
 ├── validate.py              # Validación de calidad de landmarks
 ├── morph_config.json        # Configuración de tiempos (editable)
 ├── requirements.txt         # Dependencias Python
 ├── README.md                # Este archivo (guía completa)
-├── LANDMARK_EDITOR_MANUAL.md # Manual detallado del editor (referencia)
 ├── photos/                  # Imágenes de entrada (no versionado)
 ├── landmarks/               # JSONs de correspondencias (versionado)
 ├── output/                  # Videos generados (no versionado)
@@ -601,7 +546,6 @@ face_morpher/
 | `opencv-contrib-python` | 4.8.0 | Procesamiento de imagen y UI |
 | `numpy` | 1.24.0 | Operaciones matriciales |
 | `scipy` | 1.11.0 | Interpolación RBF para TPS |
-| `scikit-image` | 0.21.0 | Flujo óptico TVL1 |
 | `imageio-ffmpeg` | 0.4.10 | Codificación H.264 MP4 |
 | `Pillow` | 10.0.0 | I/O de imágenes |
 

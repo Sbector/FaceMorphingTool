@@ -202,7 +202,6 @@ def main():
     parser.add_argument("--landmarks-dir", default="landmarks", help="Landmarks directory")
     parser.add_argument("--output", default="output/morph.mp4", help="Output video path")
     parser.add_argument("--profile", default="preview", choices=["preview", "final"])
-    parser.add_argument("--backend", default="tps", choices=["delaunay", "opticalflow", "tps"])
     parser.add_argument("--mode", choices=["sequential", "all-pairs"], help="Override mode selection")
     parser.add_argument("--skip-editor", action="store_true", help="Skip landmark editing")
     parser.add_argument("--skip-timing", action="store_true", help="Skip timing editor")
@@ -310,7 +309,6 @@ def main():
         get_python_executable(),
         "morph.py",
         "--photos", args.photos,
-        "--backend", args.backend,
         "--points-dir", args.landmarks_dir,
         "--profile", args.profile,
         "--mode", mode,
