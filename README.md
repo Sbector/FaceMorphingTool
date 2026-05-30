@@ -115,6 +115,47 @@ img1 → img3 → img5 → img2 → img4 → img1  (orden optimizado)
 
 Para N imágenes: `N(N-1)/2` pares únicos. Con auto-inversión solo necesitas crear la mitad.
 
+### Directed-all-pairs (Circuito de Euler Dirigido) ⭐ NUEVO
+
+Recorre **todas las combinaciones dirigidas** (A→B y B→A como pares **distintos**), con la garantía especial de que **ningún par inverso ocurre consecutivamente** — evitando así reversiones abruptas en la animación.
+
+Para N imágenes: `N(N-1)` pares dirigidos. Cada transición es un **camino de ida sin retroceso inmediato**.
+
+```
+5 imágenes → 20 transiciones dirigidas → circuito de 21 vértices
+1→2 → 1→3 → 1→4 → 1→5 → 2→3 → 2→4 → ... (NUNCA 1→2 seguido de 2→1)
+```
+
+**Ejemplo de ejecución:**
+
+```bash
+# Render con calidad final, modo dirigido
+python morph.py --photos photos/ --width 1080 --height 1920 \
+  --profile final --mode directed-all-pairs --output output/morph_all20.mp4
+
+# Con configuración personalizada
+python morph.py --photos photos/ --width 1080 --height 1920 \
+  --profile final --mode directed-all-pairs \
+  --duration 8.35 --hold 0 --fps 60
+```
+
+**Timing:**
+
+Con 5 imágenes, los parámetros por defecto generan exactamente:
+- 20 transiciones × 501 frames/transición = **10,020 frames totales**
+- 10,020 frames ÷ 60 fps = **167.0 segundos = 2′47″ exactos**
+- Loop visual perfecto: termina en la misma imagen donde comenzó
+
+**Archivo de configuración** (`morph_config.json`):
+
+```json
+{
+  "duration": 8.35,
+  "hold": 0.0,
+  "fps": 60
+}
+```
+
 ---
 
 ## ✏️ Editor de landmarks
